@@ -13,7 +13,7 @@ import config
 from filters import EFFECTS
 from gestures import GestureRecognizer, GestureType, PinchState
 from hand_tracking import HandTracker
-from portal import PortalState, render_portal, cinematic_start_charge, cinematic_release_energy, cinematic_update_charge, cinematic_grab, cinematic_release_grab, cinematic_move_grabbed, cinematic_scale_portal, cinematic_rotate_portal, cinematic_shift_color, cinematic_set_intensity, cinematic_reset, get_cinematic_state
+from portal import PortalState, render_portal, cinematic_start_charge, cinematic_release_energy, cinematic_update_charge, cinematic_grab, cinematic_release_grab, cinematic_move_grabbed, cinematic_scale_portal, cinematic_rotate_portal, cinematic_shift_color, cinematic_set_intensity, cinematic_reset, get_cinematic_state, cinematic_trigger_vanish, cinematic_trigger_reappear
 
 WINDOW = "Hand Portal FX"
 SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
@@ -195,6 +195,14 @@ class UIManager:
             energy_text = f"Energy: {cinematic_state['energy_level']:.0%}"
             draw_text(frame, energy_text, (15, y + 42), 0.4, (100, 200, 255))
 
+        # Vanish state
+        vanish_state = cinematic_state.get('vanish_state', 'visible')
+        if vanish_state != 'visible':
+            vanish_text = f"Vanish: {vanish_state.upper()}"
+            if vanish_state == 'vanished':
+                vanish_text += " - SNAP to reappear"
+            draw_text(frame, vanish_text, (15, y + 42), 0.4, (255, 150, 255))
+
         # Gesture status
         if gesture_state and gesture_state.gesture != GestureType.NONE:
             gesture_text = f"Gesture: {gesture_state.gesture.name.replace('_', ' ')} ({gesture_state.confidence:.0%})"
@@ -288,6 +296,7 @@ class UIManager:
             "  Pinch both hands - Charge energy",
             "  Release pinch - Release energy",
             "  Hands up/down - Intensity up/down",
+            "  Snap (thumb+middle) - Vanish/Reappear",
             "",
             "KEYBOARD:",
             "  N/P - Next/Previous effect",
@@ -298,6 +307,7 @@ class UIManager:
             "  F - Toggle FPS",
             "  M - Toggle mirror",
             "  R - Reset portal & tracker",
+            "  V - Vanish/Reappear",
             "  C - Cycle camera",
             "  Q/ESC - Quit",
         ]
@@ -488,7 +498,15 @@ def run(args) -> None:
             # Handle advanced gestures for portal control
             if gesture_state and gesture_state.gesture != GestureType.NONE:
                 if now - last_gesture_time > gesture_cooldown:
-                    handle_gesture_action(gesture_state, portal, hands, now)
+                    # Handle snap gesture immediately with frame
+                    if gesture_state.gesture == GestureType.SNAP:
+                        cinematic_state = get_cinematic_state()
+                        if cinematic_state['vanish_state'] == 'visible':
+                            cinematic_trigger_vanish(frame, now)
+                        elif cinematic_state['vanish_state'] == 'vanished':
+                            cinematic_trigger_reappear(now)
+                    else:
+                        handle_gesture_action(gesture_state, portal, hands, now)
                     last_gesture_time = now
 
             # Update portal
@@ -578,6 +596,15 @@ def run(args) -> None:
                 tracker.close()
                 tracker = HandTracker()
                 feedback, feedback_until = "Tracking reset", now + 1.5
+            elif key in (ord("v"), ord("V")):
+                # Keyboard trigger for vanish/reappear (testing)
+                cinematic_state = get_cinematic_state()
+                if cinematic_state['vanish_state'] == 'visible':
+                    cinematic_trigger_vanish(frame, now)
+                    feedback, feedback_until = "Vanish triggered", now + 1.5
+                elif cinematic_state['vanish_state'] == 'vanished':
+                    cinematic_trigger_reappear(now)
+                    feedback, feedback_until = "Reappear triggered", now + 1.5
             elif key in (ord("c"), ord("C")):
                 # Cycle camera
                 cameras = list_cameras()
@@ -677,6 +704,16 @@ def handle_gesture_action(gesture_state, portal, hands, now):
                 center = np.mean(portal.corners, axis=0)
                 delta = new_center - center
                 portal.corners += delta
+
+    elif g == GestureType.SNAP:
+        # Finger snap - toggle vanish/reappear
+        cinematic_state = get_cinematic_state()
+        if cinematic_state['vanish_state'] == 'visible':
+            # Need the current frame for vanish effect
+            # We'll trigger this in the main loop where we have the frame
+            pass
+        elif cinematic_state['vanish_state'] == 'vanished':
+            cinematic_trigger_reappear(now)
 
     # Update portal color from cinematic state
     cinematic_state = get_cinematic_state()

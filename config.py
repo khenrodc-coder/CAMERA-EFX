@@ -52,6 +52,11 @@ BOTH_HANDS_OPEN_DWELL = 0.5
 HAND_SEPARATION_SPEED = 100.0  # pixels/sec for expand/shrink
 ROTATION_SPEED = 2.0  # rad/sec for rotation gesture
 
+# Finger snap detection
+SNAP_MIN_VELOCITY = 300.0  # pixels/sec - minimum snap velocity
+SNAP_MAX_DISTANCE = 0.15  # max normalized distance for snap (thumb tip to middle tip)
+SNAP_COOLDOWN = 1.0  # seconds between snaps
+
 # Visual effects
 PARTICLE_COUNT = 48
 GLOW_INTENSITY = 1.0

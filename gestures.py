@@ -19,6 +19,7 @@ class GestureType(Enum):
     THUMBS_UP = auto()
     POINTING = auto()
     TWO_FINGER = auto()  # Index + middle extended
+    SNAP = auto()  # Thumb + middle finger snap
 
     # Two-hand gestures
     BOTH_HANDS_OPEN = auto()
@@ -52,6 +53,9 @@ class GestureRecognizer:
         self.last_hand_positions: dict[str, np.ndarray] = {}
         self.last_hand_angles: dict[str, float] = {}
         self.both_hands_open_start: Optional[float] = None
+        # Finger snap detection state
+        self.last_snap_positions: dict[str, tuple[np.ndarray, np.ndarray]] = {}  # (thumb_tip, middle_tip)
+        self.last_snap_time: dict[str, float] = {}
         self.reset()
 
     def reset(self):
@@ -62,6 +66,8 @@ class GestureRecognizer:
         self.last_hand_positions.clear()
         self.last_hand_angles.clear()
         self.both_hands_open_start = None
+        self.last_snap_positions.clear()
+        self.last_snap_time.clear()
 
     def update(self, hands: list[Hand], now: float) -> Optional[GestureState]:
         """
@@ -103,6 +109,11 @@ class GestureRecognizer:
         for hand in hands:
             if hand.confidence < config.GESTURE_CONFIDENCE_THRESHOLD:
                 continue
+
+            # Finger snap has highest priority - check FIRST
+            snap_gesture = self._detect_finger_snap(hand, now)
+            if snap_gesture:
+                return snap_gesture
 
             extended_count = sum(1 for f in hand.fingers if f.extended)
             finger_states = [f.extended for f in hand.fingers]
@@ -310,12 +321,68 @@ class GestureRecognizer:
 
         return None
 
+    def _detect_finger_snap(self, hand: Hand, now: float) -> Optional[GestureState]:
+        """Detect finger snap gesture (thumb + middle finger).
+
+        A snap is detected when:
+        1. Fingers were close together in previous frame (normalized distance < SNAP_MAX_DISTANCE)
+        2. Middle finger moves away rapidly from thumb (high relative velocity)
+        """
+        # Check cooldown per hand
+        if hand.handedness in self.last_snap_time:
+            if now - self.last_snap_time[hand.handedness] < config.SNAP_COOLDOWN:
+                return None
+
+        # Get thumb tip (index 4) and middle finger tip (index 12)
+        thumb_tip = hand.points[4]
+        middle_tip = hand.points[12]
+
+        # Check velocity - need previous position to calculate
+        prev_positions = self.last_snap_positions.get(hand.handedness)
+        if prev_positions is not None:
+            prev_thumb, prev_middle = prev_positions
+
+            # Check if fingers WERE close in previous frame (snap starts with fingers touching)
+            prev_distance = np.linalg.norm(prev_thumb - prev_middle)
+            prev_normalized = prev_distance / max(hand.palm_size, 1.0)
+
+            # Calculate velocity of middle finger relative to thumb
+            thumb_vel = np.linalg.norm(thumb_tip - prev_thumb)
+            middle_vel = np.linalg.norm(middle_tip - prev_middle)
+            relative_vel = abs(middle_vel - thumb_vel)
+
+            # Snap detected if: was close AND moving apart rapidly
+            if prev_normalized < config.SNAP_MAX_DISTANCE and relative_vel > config.SNAP_MIN_VELOCITY / 30.0:
+                # Record snap time
+                self.last_snap_time[hand.handedness] = now
+                self.last_snap_positions[hand.handedness] = (thumb_tip.copy(), middle_tip.copy())
+                return GestureState(
+                    gesture=GestureType.SNAP,
+                    confidence=min(1.0, relative_vel / (config.SNAP_MIN_VELOCITY / 30.0)),
+                    handedness=hand.handedness,
+                    start_time=now,
+                    data={
+                        "thumb_tip": thumb_tip,
+                        "middle_tip": middle_tip,
+                        "velocity": relative_vel * 30,
+                        "palm_center": hand.palm_center
+                    }
+                )
+
+        # Update last positions
+        self.last_snap_positions[hand.handedness] = (thumb_tip.copy(), middle_tip.copy())
+        return None
+
     def _resolve_gesture_priority(self, pinch_triggered: bool,
                                    single: Optional[GestureState],
                                    two_hand: Optional[GestureState],
                                    now: float) -> Optional[GestureState]:
         """Resolve which gesture takes priority."""
-        # Pinch has highest priority for effect switching (legacy)
+        # SNAP has highest priority (unique gesture, should trigger immediately)
+        if single and single.gesture == GestureType.SNAP:
+            return single
+
+        # Pinch has high priority for effect switching (legacy)
         if pinch_triggered:
             return GestureState(
                 gesture=GestureType.PINCH,

@@ -89,6 +89,13 @@ _cinematic_state = {
     'intensity': 1.0,
     'rotation': 0.0,
     'scale': 1.0,
+    # Vanish effect state
+    'vanish_state': 'visible',  # 'visible', 'vanishing', 'vanished', 'reappearing'
+    'vanish_start_time': 0.0,
+    'vanish_progress': 0.0,
+    'vanish_particles': [],
+    'reconstruction_particles': [],
+    'last_frame': None,  # Store last visible frame for reconstruction
 }
 
 
@@ -108,6 +115,12 @@ def _reset_cinematic_state():
         'intensity': 1.0,
         'rotation': 0.0,
         'scale': 1.0,
+        # Vanish effect state
+        'vanish_state': 'visible',
+        'vanish_start_time': 0.0,
+        'vanish_progress': 0.0,
+        'vanish_particles': [],
+        'last_frame': None,
     }
 
 
@@ -157,6 +170,13 @@ def render_portal(frame: np.ndarray, corners: np.ndarray, opacity: float,
     _update_cinematic_state(corners, opacity, now)
 
     output = frame.copy()
+
+    # Handle vanish effect
+    vanish_state = _cinematic_state['vanish_state']
+    if vanish_state in ('vanishing', 'vanished', 'reappearing'):
+        output = _render_vanish_effect(frame, output, now)
+        return output
+
     if opacity <= 0 or corners is None:
         return output
 
@@ -489,6 +509,211 @@ def cinematic_set_intensity(intensity: float):
 def cinematic_reset():
     """Reset cinematic portal state."""
     _reset_cinematic_state()
+
+
+# Vanish effect control functions
+def cinematic_trigger_vanish(frame: np.ndarray, now: float):
+    """Trigger vanish effect - make body disappear with cinematic effect."""
+    _cinematic_state['vanish_state'] = 'vanishing'
+    _cinematic_state['vanish_start_time'] = now
+    _cinematic_state['vanish_progress'] = 0.0
+    # Store the current frame for reconstruction
+    _cinematic_state['last_frame'] = frame.copy()
+    # Initialize disintegration particles
+    _init_vanish_particles(frame)
+
+
+def cinematic_trigger_reappear(now: float):
+    """Trigger reappear effect - reconstruct body from particles."""
+    if _cinematic_state['vanish_state'] == 'vanished':
+        _cinematic_state['vanish_state'] = 'reappearing'
+        _cinematic_state['vanish_start_time'] = now
+        _cinematic_state['vanish_progress'] = 0.0
+
+
+def _init_vanish_particles(frame: np.ndarray):
+    """Initialize particles for vanish effect."""
+    h, w = frame.shape[:2]
+    particles = []
+    # Create particles across the body area (entire frame)
+    for _ in range(200):
+        x = np.random.uniform(0, w)
+        y = np.random.uniform(0, h)
+        # Sample color from frame
+        if int(y) < h and int(x) < w:
+            color = frame[int(y), int(x)].astype(np.float32)
+        else:
+            color = np.array([100, 100, 100], dtype=np.float32)
+        # Random velocity outward
+        angle = np.random.uniform(0, 2 * np.pi)
+        speed = np.random.uniform(50, 300)
+        vx = speed * np.cos(angle)
+        vy = speed * np.sin(angle)
+        # Add some gravity
+        gravity = np.random.uniform(50, 150)
+        size = np.random.uniform(2, 6)
+        lifetime = np.random.uniform(0.5, 1.5)
+        particles.append({
+            'pos': np.array([x, y], dtype=np.float32),
+            'vel': np.array([vx, vy], dtype=np.float32),
+            'gravity': gravity,
+            'color': color,
+            'size': size,
+            'lifetime': lifetime,
+            'age': 0.0,
+            'alpha': 1.0
+        })
+    _cinematic_state['vanish_particles'] = particles
+
+
+def _render_vanish_effect(original_frame: np.ndarray, current_frame: np.ndarray, now: float) -> np.ndarray:
+    """Render vanish/reappear effect with particles and flash."""
+    vanish_state = _cinematic_state['vanish_state']
+    elapsed = now - _cinematic_state['vanish_start_time']
+
+    if vanish_state == 'vanishing':
+        # Vanishing phase: 0.8 seconds
+        duration = 0.8
+        progress = min(1.0, elapsed / duration)
+        _cinematic_state['vanish_progress'] = progress
+
+        # White flash at the moment of vanish
+        flash_intensity = 1.0 - abs(progress - 0.5) * 2
+        flash_intensity = max(0, flash_intensity) * (1 - progress)
+
+        output = current_frame.astype(np.float32)
+
+        # Add flash
+        if flash_intensity > 0:
+            flash = np.ones_like(output) * 255 * flash_intensity
+            output = output * (1 - flash_intensity * 0.8) + flash * flash_intensity * 0.8
+
+        # Update and draw disintegration particles
+        output = _update_vanish_particles(output, elapsed)
+
+        # Fade out the original image
+        fade_alpha = 1.0 - progress
+        output = output * fade_alpha
+
+        if progress >= 1.0:
+            _cinematic_state['vanish_state'] = 'vanished'
+            _cinematic_state['vanish_progress'] = 1.0
+
+        return np.clip(output, 0, 255).astype(np.uint8)
+
+    elif vanish_state == 'vanished':
+        # Stay vanished - show dark/dusty scene
+        h, w = original_frame.shape[:2]
+        output = np.zeros((h, w, 3), dtype=np.float32)
+        # Add faint dust particles
+        output = _update_vanish_particles(output, elapsed)
+        return np.clip(output, 0, 255).astype(np.uint8)
+
+    elif vanish_state == 'reappearing':
+        # Reappearing phase: 1.0 seconds
+        duration = 1.0
+        progress = min(1.0, elapsed / duration)
+        _cinematic_state['vanish_progress'] = progress
+
+        output = np.zeros_like(original_frame, dtype=np.float32)
+
+        # Reconstruction: particles converge to form the image
+        last_frame = _cinematic_state['last_frame']
+        if last_frame is not None:
+            # Use reconstruction particles
+            output = _render_reconstruction(last_frame, progress, elapsed)
+
+        # White flash at completion
+        if progress > 0.9:
+            flash_intensity = (progress - 0.9) * 10
+            flash = np.ones_like(output) * 255 * flash_intensity
+            output = output * (1 - flash_intensity * 0.5) + flash * flash_intensity * 0.5
+
+        if progress >= 1.0:
+            _cinematic_state['vanish_state'] = 'visible'
+            _cinematic_state['vanish_progress'] = 0.0
+            _cinematic_state['vanish_particles'] = []
+            _cinematic_state['reconstruction_particles'] = []
+
+        return np.clip(output, 0, 255).astype(np.uint8)
+
+    return current_frame
+
+
+def _update_vanish_particles(frame: np.ndarray, elapsed: float) -> np.ndarray:
+    """Update and draw vanish particles."""
+    particles = _cinematic_state['vanish_particles']
+    if not particles:
+        return frame
+
+    output = frame.copy()
+    h, w = output.shape[:2]
+    dt = 1/30.0  # Assume 30 FPS
+
+    # Remove dead particles
+    alive_particles = []
+    for p in particles:
+        p['age'] += dt
+        if p['age'] < p['lifetime']:
+            # Update position
+            p['vel'][1] += p['gravity'] * dt  # Gravity
+            p['pos'] += p['vel'] * dt
+            p['alpha'] = 1.0 - (p['age'] / p['lifetime'])
+            alive_particles.append(p)
+
+            # Draw particle
+            x, y = int(p['pos'][0]), int(p['pos'][1])
+            if 0 <= x < w and 0 <= y < h:
+                size = max(1, int(p['size'] * p['alpha']))
+                color_val = p['color'] * p['alpha']
+                color = (int(color_val[0]), int(color_val[1]), int(color_val[2]))
+                cv2.circle(output, (x, y), size, color, -1, cv2.LINE_AA)
+
+    _cinematic_state['vanish_particles'] = alive_particles
+    return output
+
+
+def _render_reconstruction(target_frame: np.ndarray, progress: float, elapsed: float) -> np.ndarray:
+    """Render reconstruction from particles to target image."""
+    h, w = target_frame.shape[:2]
+    output = np.zeros_like(target_frame, dtype=np.float32)
+
+    # Check if we need to initialize reconstruction particles (not vanish particles)
+    particles = _cinematic_state.get('reconstruction_particles')
+
+    if particles is None:
+        # Initialize reconstruction particles from target image
+        particles = []
+        grid_step = 8
+        for y in range(0, h, grid_step):
+            for x in range(0, w, grid_step):
+                color = target_frame[y, x].astype(np.float32)
+                # Start from random positions
+                start_x = np.random.uniform(0, w)
+                start_y = np.random.uniform(0, h)
+                # Target position
+                target_x, target_y = x, y
+                particles.append({
+                    'pos': np.array([start_x, start_y], dtype=np.float32),
+                    'target': np.array([target_x, target_y], dtype=np.float32),
+                    'color': color,
+                    'size': grid_step // 2 + 1
+                })
+        _cinematic_state['reconstruction_particles'] = particles
+
+    # Animate particles to target positions
+    for p in particles:
+        # Smooth interpolation
+        t = progress * progress * (3 - 2 * progress)  # Smoothstep
+        current_pos = p['pos'] * (1 - t) + p['target'] * t
+
+        x, y = int(current_pos[0]), int(current_pos[1])
+        if 0 <= x < w and 0 <= y < h:
+            size = max(1, int(p['size'] * (0.5 + 0.5 * progress)))
+            color = tuple(p['color'].astype(np.uint8))
+            cv2.circle(output, (x, y), size, color, -1, cv2.LINE_AA)
+
+    return output
 
 
 # Expose cinematic state for UI
